@@ -62,8 +62,11 @@ visualize = [
     "opencv-python>=4.8.0",
     "matplotlib>=3.7.0",
 ]
+segment = [
+    "ruptures>=1.1.0",
+]
 all = [
-    "forge-robotics[rlds,lerobot,zarr,rosbag,hdf5,robodm,video,hub,visualize]",
+    "forge-robotics[rlds,lerobot,zarr,rosbag,hdf5,robodm,video,hub,visualize,segment]",
 ]
 dev = [
     "pytest>=7.4.0",
@@ -110,6 +113,7 @@ module = [
     "h5py.*",
     "robodm.*",
     "cv2.*",
+    "ruptures.*",
 ]
 ignore_missing_imports = true
 
