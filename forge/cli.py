@@ -17,14 +17,26 @@ app = typer.Typer(
     help="Forge - Robotics dataset format converter",
     add_completion=False,
 )
+registry_app = typer.Typer(
+    name="registry",
+    help="Dataset registry - browse and search known robotics datasets.",
+)
+app.add_typer(registry_app, name="registry")
 console = Console()
 
 
-def _resolve_dataset_path(path_str: str) -> Path:
+def _resolve_dataset_path(path_str: str, demo: bool = False) -> Path:
     """Resolve a dataset path, downloading from HuggingFace Hub if needed.
 
+    Resolution order:
+    1. HuggingFace URL (hf://org/repo) — download via hub module
+    2. Existing filesystem path — return as-is
+    3. Registry dataset ID — lookup and resolve source URI
+    4. Fall through as filesystem path (for error reporting by caller)
+
     Args:
-        path_str: Local path or HuggingFace URL (hf://org/repo).
+        path_str: Local path, HuggingFace URL, or registry dataset ID.
+        demo: If True and resolving via registry, use demo-suitable source.
 
     Returns:
         Resolved local path.
@@ -43,7 +55,49 @@ def _resolve_dataset_path(path_str: str) -> Path:
         console.print(f"[green]Downloaded to:[/green] {local_path}")
         return local_path
 
-    return Path(path_str)
+    # Check filesystem first
+    path = Path(path_str)
+    if path.exists():
+        return path
+
+    # Try registry lookup for bare identifiers (no /, no . prefix)
+    if "/" not in path_str and not path_str.startswith("."):
+        try:
+            from forge.registry import DatasetRegistry
+
+            entry = DatasetRegistry.get(path_str)
+            source = DatasetRegistry.get_source(path_str, demo=demo)
+            console.print(
+                f"[cyan]Resolved from registry:[/cyan] {entry.name} "
+                f"({entry.format})"
+            )
+
+            if source.type == "hf_hub":
+                return _resolve_dataset_path(f"hf://{source.uri}")
+            elif source.type == "gcs":
+                console.print(f"[yellow]GCS source:[/yellow] {source.uri}")
+                if source.notes:
+                    console.print(f"[dim]{source.notes}[/dim]")
+                console.print("Download manually with: gsutil cp -r ...")
+                raise typer.Exit(1)
+            else:
+                console.print(f"[yellow]Source:[/yellow] {source.uri}")
+                if source.notes:
+                    console.print(f"[dim]{source.notes}[/dim]")
+                raise typer.Exit(1)
+        except ImportError:
+            pass
+        except Exception as e:
+            from forge.core.exceptions import DatasetNotFoundError
+
+            if isinstance(e, DatasetNotFoundError):
+                # Don't swallow — let it fall through to filesystem path
+                pass
+            elif isinstance(e, (typer.Exit, SystemExit)):
+                raise
+            # Other errors: fall through silently
+
+    return path
 
 
 def _quick_inspect_hub(path: str, output: str = "text") -> None:
@@ -1861,6 +1915,315 @@ def filter_cmd(
             + (f" --exclude-flags {exclude_flags}" if exclude_flags else "")
             + (f" --from-report {from_report}" if from_report else "")
         )
+
+
+# --- Registry subcommands ---
+
+
+@registry_app.command("list")
+def registry_list_cmd(
+    format: str | None = typer.Option(None, "--format", "-f", help="Filter by format (e.g., rlds, lerobot)"),
+    embodiment: str | None = typer.Option(None, "--embodiment", "-e", help="Filter by robot (e.g., franka)"),
+    tag: str | None = typer.Option(None, "--tag", "-t", help="Filter by tag (e.g., language_conditioned)"),
+    demo: bool = typer.Option(False, "--demo", help="Show only demo-suitable datasets (<=100 episodes)"),
+    html: bool = typer.Option(False, "--html", help="Open interactive HTML view in browser"),
+) -> None:
+    """List all datasets in the registry, with optional filters."""
+    from forge.registry import DatasetRegistry
+
+    try:
+        entries = DatasetRegistry.list(
+            format=format, embodiment=embodiment, tag=tag, demo_only=demo,
+        )
+    except Exception as e:
+        console.print(f"[red]Error loading registry:[/red] {e}")
+        raise typer.Exit(1)
+
+    if not entries:
+        console.print("[yellow]No datasets match the given filters.[/yellow]")
+        raise typer.Exit(0)
+
+    if html:
+        from forge.registry.html import open_registry_html
+
+        path = open_registry_html(entries)
+        console.print(f"[green]Opened registry browser:[/green] {path}")
+        return
+
+    table = Table(title=f"Forge Dataset Registry ({len(entries)} datasets)")
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("Name", style="bold")
+    table.add_column("Format", style="green")
+    table.add_column("Embodiment")
+    table.add_column("Episodes", justify="right")
+    table.add_column("Demo", justify="center")
+
+    for entry in entries:
+        eps = ""
+        if entry.scale and entry.scale.episodes is not None:
+            eps = f"{'~' if entry.scale.approximate else ''}{entry.scale.episodes:,}"
+        table.add_row(
+            entry.id,
+            entry.name,
+            entry.format,
+            ", ".join(entry.embodiment[:2]) + ("..." if len(entry.embodiment) > 2 else ""),
+            eps,
+            "[green]yes[/green]" if entry.demo_suitable else "",
+        )
+
+    console.print(table)
+
+
+@registry_app.command("info")
+def registry_info_cmd(
+    dataset_id: str = typer.Argument(..., help="Dataset ID (e.g., droid, bridge_v2)"),
+) -> None:
+    """Show detailed metadata for a dataset."""
+    from rich.panel import Panel
+    from rich.text import Text
+
+    from forge.core.exceptions import DatasetNotFoundError
+    from forge.registry import DatasetRegistry
+
+    try:
+        entry = DatasetRegistry.get(dataset_id)
+    except DatasetNotFoundError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    lines: list[str] = []
+    lines.append(f"[bold]{entry.name}[/bold]")
+    lines.append(f"[dim]{entry.description}[/dim]")
+    lines.append("")
+    lines.append(f"  [cyan]ID:[/cyan]          {entry.id}")
+    lines.append(f"  [cyan]Format:[/cyan]      {entry.format}")
+    lines.append(f"  [cyan]Embodiment:[/cyan]  {', '.join(entry.embodiment)}")
+    if entry.license:
+        lines.append(f"  [cyan]License:[/cyan]     {entry.license}")
+    if entry.paper_url:
+        lines.append(f"  [cyan]Paper:[/cyan]       {entry.paper_url}")
+
+    if entry.scale:
+        scale_parts = []
+        if entry.scale.episodes is not None:
+            scale_parts.append(f"{entry.scale.episodes:,} episodes")
+        if entry.scale.hours is not None:
+            scale_parts.append(f"{entry.scale.hours:.0f} hours")
+        if entry.scale.approximate:
+            scale_parts.append("(approximate)")
+        lines.append(f"  [cyan]Scale:[/cyan]       {' | '.join(scale_parts)}")
+
+    if entry.task_types:
+        lines.append(f"  [cyan]Tasks:[/cyan]       {', '.join(entry.task_types)}")
+    if entry.tags:
+        lines.append(f"  [cyan]Tags:[/cyan]        {', '.join(entry.tags)}")
+
+    lines.append("")
+    lines.append("  [bold]Sources:[/bold]")
+    for i, source in enumerate(entry.sources):
+        marker = " [green](demo)[/green]" if i == entry.demo_source_index else ""
+        lines.append(f"    [{source.type}] {source.uri}{marker}")
+        if source.notes:
+            lines.append(f"      [dim]{source.notes}[/dim]")
+
+    if entry.demo_suitable:
+        lines.append("")
+        eps = f" ({entry.demo_episodes} episodes)" if entry.demo_episodes else ""
+        lines.append(f"  [green]Demo suitable[/green]{eps}")
+
+    if entry.notes:
+        lines.append("")
+        lines.append(f"  [dim]Note: {entry.notes}[/dim]")
+
+    console.print(Panel("\n".join(lines), title=f"Dataset: {entry.id}"))
+
+
+@registry_app.command("search")
+def registry_search_cmd(
+    query: str = typer.Argument(..., help="Search query (e.g., 'franka manipulation')"),
+) -> None:
+    """Search datasets by keyword across names, tags, embodiments, and task types."""
+    from forge.registry import DatasetRegistry
+
+    try:
+        results = DatasetRegistry.search(query)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    if not results:
+        console.print(f"[yellow]No datasets matching '{query}'.[/yellow]")
+        raise typer.Exit(0)
+
+    table = Table(title=f"Search results for '{query}' ({len(results)} matches)")
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("Name", style="bold")
+    table.add_column("Format", style="green")
+    table.add_column("Description")
+
+    for entry in results:
+        desc = entry.description
+        if len(desc) > 80:
+            desc = desc[:77] + "..."
+        table.add_row(entry.id, entry.name, entry.format, desc)
+
+    console.print(table)
+
+
+@registry_app.command("validate")
+def registry_validate_cmd(
+    path: str | None = typer.Option(None, "--path", "-p", help="Path to datasets.json (default: bundled)"),
+    probe: bool = typer.Option(False, "--probe", help="Check that source URIs are reachable (requires network)"),
+) -> None:
+    """Validate the registry JSON for schema correctness and integrity."""
+    from forge.registry.validation import validate_registry
+
+    registry_path = Path(path) if path else None
+    result = validate_registry(path=registry_path, probe=probe)
+
+    if result.errors:
+        console.print(f"[red bold]Errors ({len(result.errors)}):[/red bold]")
+        for err in result.errors:
+            console.print(f"  [red]x[/red] {err}")
+
+    if result.warnings:
+        console.print(f"[yellow bold]Warnings ({len(result.warnings)}):[/yellow bold]")
+        for warn in result.warnings:
+            console.print(f"  [yellow]![/yellow] {warn}")
+
+    if result.ok:
+        console.print("[green]Registry is valid.[/green]")
+    else:
+        raise typer.Exit(1)
+
+
+@app.command("demo")
+def demo_cmd(
+    dataset_id: str | None = typer.Argument(
+        None, help="Registry dataset ID (default: picks a random demo dataset)"
+    ),
+    skip_quality: bool = typer.Option(
+        False, "--skip-quality", help="Skip quality analysis step"
+    ),
+) -> None:
+    """Download a demo dataset and run inspect + quality. Great for getting started.
+
+    Examples:
+        forge demo                    # random demo dataset
+        forge demo pusht              # specific dataset
+        forge demo droid_100          # DROID 100-episode subset
+    """
+    import random
+
+    from rich.panel import Panel
+
+    from forge.core.exceptions import DatasetNotFoundError
+    from forge.registry import DatasetRegistry
+
+    # Pick a demo dataset
+    if dataset_id:
+        try:
+            entry = DatasetRegistry.get(dataset_id)
+        except DatasetNotFoundError as e:
+            console.print(f"[red]Error:[/red] {e}")
+            raise typer.Exit(1)
+        if not entry.demo_suitable:
+            console.print(
+                f"[yellow]Warning:[/yellow] '{dataset_id}' is not a demo-suitable dataset "
+                f"({entry.scale.episodes:,} episodes). It may take a while to download."
+            )
+            console.print(
+                "[dim]Demo-suitable datasets: "
+                + ", ".join(e.id for e in DatasetRegistry.demo_datasets())
+                + "[/dim]"
+            )
+    else:
+        demos = DatasetRegistry.demo_datasets()
+        if not demos:
+            console.print("[red]No demo-suitable datasets found in registry.[/red]")
+            raise typer.Exit(1)
+        entry = random.choice(demos)
+        console.print(f"[cyan]Selected demo dataset:[/cyan] {entry.name} ({entry.id})")
+
+    console.print()
+
+    # Step 1: Download
+    console.print("[bold]Step 1/3:[/bold] Downloading dataset...")
+    console.print()
+    source = DatasetRegistry.get_source(entry.id, demo=entry.demo_suitable)
+    if source.type == "hf_hub":
+        local_path = _resolve_dataset_path(f"hf://{source.uri}")
+    else:
+        console.print(f"[yellow]Source type '{source.type}' requires manual download:[/yellow]")
+        console.print(f"  {source.uri}")
+        raise typer.Exit(1)
+
+    console.print()
+
+    # Step 2: Inspect
+    console.print("[bold]Step 2/3:[/bold] Inspecting dataset...")
+    console.print()
+    try:
+        from forge.inspect import Inspector
+
+        inspector = Inspector()
+        info = inspector.inspect(local_path)
+
+        lines = [
+            f"  Format:     [green]{info.format}[/green]",
+            f"  Episodes:   {info.num_episodes:,}",
+            f"  Frames:     {info.total_frames:,}",
+        ]
+        if info.cameras:
+            cam_names = ", ".join(info.cameras.keys())
+            lines.append(f"  Cameras:    {cam_names}")
+        if info.inferred_fps:
+            lines.append(f"  FPS:        {info.inferred_fps}")
+
+        console.print(Panel("\n".join(lines), title="Inspection Results", border_style="blue"))
+        console.print()
+    except Exception as e:
+        console.print(f"[yellow]Inspection failed:[/yellow] {e}")
+        console.print()
+
+    # Step 3: Quality
+    if not skip_quality:
+        console.print("[bold]Step 3/3:[/bold] Running quality analysis...")
+        console.print()
+        try:
+            from forge.quality import QualityAnalyzer, QualityConfig
+
+            config = QualityConfig()
+            analyzer = QualityAnalyzer(config)
+            report = analyzer.analyze(local_path)
+
+            lines = [
+                f"  Overall score:  [bold]{report.mean_score:.1f}[/bold] / 10",
+                f"  Episodes:       {report.num_episodes}",
+            ]
+            if report.flagged_episodes:
+                lines.append(
+                    f"  Flagged:        [yellow]{len(report.flagged_episodes)}[/yellow] episodes"
+                )
+
+            console.print(
+                Panel("\n".join(lines), title="Quality Report", border_style="green")
+            )
+            console.print()
+        except Exception as e:
+            console.print(f"[yellow]Quality analysis failed:[/yellow] {e}")
+            console.print()
+    else:
+        console.print("[dim]Step 3/3: Skipped (--skip-quality)[/dim]")
+        console.print()
+
+    # Summary
+    console.print("[bold green]Done![/bold green] Next steps:")
+    console.print(f"  [cyan]forge visualize[/cyan] {local_path}")
+    console.print(f"  [cyan]forge convert[/cyan] {local_path} ./output --format lerobot-v3")
+    console.print(f"  [cyan]forge quality[/cyan] {local_path} --export report.json")
+    if entry.paper_url:
+        console.print(f"  Paper: {entry.paper_url}")
 
 
 @app.command("version")

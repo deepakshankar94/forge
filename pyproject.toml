@@ -62,8 +62,11 @@ visualize = [
     "opencv-python>=4.8.0",
     "matplotlib>=3.7.0",
 ]
+registry = [
+    "jinja2>=3.1.0",
+]
 all = [
-    "forge-robotics[rlds,lerobot,zarr,rosbag,hdf5,robodm,video,hub,visualize]",
+    "forge-robotics[rlds,lerobot,zarr,rosbag,hdf5,robodm,video,hub,visualize,registry]",
 ]
 dev = [
     "pytest>=7.4.0",

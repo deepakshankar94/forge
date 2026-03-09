@@ -166,6 +166,28 @@ class SchemaError(ForgeError):
         )
 
 
+class DatasetNotFoundError(ForgeError):
+    """Raised when a dataset is not found in the registry.
+
+    Attributes:
+        dataset_id: The requested dataset ID.
+        suggestions: Similar dataset IDs that might be what the user meant.
+    """
+
+    def __init__(
+        self,
+        dataset_id: str,
+        suggestions: list[str] | None = None,
+    ):
+        self.dataset_id = dataset_id
+        self.suggestions = suggestions or []
+
+        msg = f"Dataset '{dataset_id}' not found in registry."
+        if self.suggestions:
+            msg += f" Did you mean: {', '.join(self.suggestions)}?"
+        super().__init__(msg)
+
+
 class EpisodeNotFoundError(ForgeError):
     """Raised when a specific episode cannot be found.
 
