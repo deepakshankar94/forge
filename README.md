@@ -8,7 +8,7 @@
 ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝
 </pre>
 <h2>⚒ Robotics Data Toolkit ⚒</h2>
-<i>Convert, inspect, visualize, and score robotics datasets across every major format.</i>
+<i>Convert, inspect, visualize, score, and discover robotics datasets across every major format.</i>
 <br><br>
 <a href="https://github.com/arpitg1304/forge"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square"></a>
 <a href="https://github.com/arpitg1304/forge/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green?style=flat-square"></a>
@@ -134,6 +134,52 @@ forge filter ./my_dataset ./filtered --from-report report.json       # Skip re-a
 
 See [forge/filter/README.md](forge/filter/README.md) for full details.
 
+## Dataset Registry
+
+A curated catalog of 23+ prominent robotics datasets — browse, search, and download by name instead of memorizing URIs.
+
+```bash
+# Browse all datasets
+forge registry list
+
+# Open an interactive HTML browser with filtering
+forge registry list --html
+
+# Filter by format, embodiment, or tags
+forge registry list --format rlds --embodiment franka
+forge registry list --tag manipulation --demo
+
+# Get detailed info on a dataset
+forge registry info droid
+
+# Search across names, tags, embodiments, and task types
+forge registry search "franka manipulation"
+
+# Validate the registry (for contributors)
+forge registry validate
+```
+
+### Registry ID Resolution
+
+Use dataset IDs directly in any command — no need for full paths or URIs:
+
+```bash
+forge inspect droid          # resolves to hf://lerobot/droid
+forge quality pusht          # resolves to hf://lerobot/pusht
+forge convert droid ./output --format lerobot-v3
+```
+
+### Quick Start with `forge demo`
+
+Download a small demo dataset, inspect it, and run quality scoring — all in one command:
+
+```bash
+forge demo                   # uses pusht by default
+forge demo aloha_sim_cube    # or pick any demo-suitable dataset
+```
+
+See [forge/registry/CONTRIBUTING.md](forge/registry/CONTRIBUTING.md) for how to add new datasets to the registry.
+
 ## Episode Segmentation
 
 Automatic episode segmentation via PELT changepoint detection on proprioception signals. Splits episodes into contiguous phases (sub-skills, regime changes, idle periods) without video processing.
@@ -158,6 +204,8 @@ See [docs/cli.md](docs/cli.md) for the full command reference including:
 - `forge visualize` - Interactive dataset viewer
 - `forge quality` - Episode-level quality scoring ([details](forge/quality/README.md))
 - `forge filter` - Quality-based episode filtering ([details](forge/filter/README.md))
+- `forge registry` - Browse and search the dataset registry
+- `forge demo` - Quick-start with a demo dataset
 - `forge segment` - Episode segmentation via changepoint detection ([details](forge/segment/README.md))
 - `forge stats` - Compute dataset statistics
 - `forge export-video` - Extract camera videos as MP4
@@ -180,6 +228,7 @@ Planned features (contributions welcome!):
 
 - [ ] **Dataset merging** - Combine multiple datasets into one (`forge merge ds1/ ds2/ --output combined/`)
 - [ ] **Train/val/test splitting** - Split datasets with stratification (`--split 80/10/10`)
+- [x] **Dataset registry** - Curated catalog of 23+ robotics datasets with CLI browser and HTML viewer
 - [ ] **Streaming reads** - Process HuggingFace datasets without full download
 - [x] **Episode filtering** - Filter by quality score, flags, or episode IDs (`forge filter --min-quality 6.0`)
 - [ ] **Depth/point cloud support** - Preserve depth streams from RLDS/Open-X
