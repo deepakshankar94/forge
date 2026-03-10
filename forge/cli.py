@@ -759,66 +759,76 @@ def convert_cmd(
 
 @app.command("visualize")
 def visualize_cmd(
-    path: str = typer.Argument(..., help="Path to dataset (local path or hf://org/repo)"),
+    path: str = typer.Argument(..., help="Path to dataset (local path, hf://org/repo, or registry ID)"),
     compare: str | None = typer.Option(
         None, "--compare", "-c", help="Second dataset for side-by-side comparison"
     ),
     episode: int = typer.Option(0, "--episode", "-e", help="Starting episode index"),
     backend: str = typer.Option(
-        "matplotlib", "--backend", "-b", help="Viewer backend: matplotlib (interactive) or opencv (fast playback)"
+        "web", "--backend", "-b", help="Viewer backend: web (default), matplotlib, opencv"
     ),
+    samples: int = typer.Option(10, "--samples", "-s", help="Max episodes to load"),
+    segment: bool = typer.Option(False, "--segment", help="Run segmentation and show phase labels"),
+    port: int = typer.Option(0, "--port", help="Port for web viewer (0 = auto)"),
 ) -> None:
     """Visualize a dataset interactively.
 
     Supports all formats (RLDS, LeRobot v2/v3, Zarr) through the unified viewer.
     Use --compare to show two datasets side-by-side for comparison.
-    Supports HuggingFace Hub URLs (hf://org/repo).
+    Supports HuggingFace Hub URLs (hf://org/repo) and registry IDs.
 
     Backends:
-        matplotlib: Interactive with sliders (default). Slower playback.
+        web: Browser-based viewer (default). Segment overlay, keyboard controls.
+        matplotlib: Interactive with sliders. Slower playback.
         opencv: Fast playback with keyboard controls. No comparison mode.
 
     Examples:
-        forge visualize dataset.zarr
-        forge visualize converted_lerobot_v3
-        forge visualize hf://lerobot/pusht
+        forge visualize pusht
+        forge visualize pusht --segment
+        forge visualize hf://lerobot/pusht --backend matplotlib
         forge visualize original/ --compare converted/
         forge visualize dataset/ --backend opencv
     """
     from forge.core.exceptions import ForgeError
-    from forge.hub import is_hf_url
 
-    # Resolve HuggingFace URLs to local paths
-    if is_hf_url(path):
-        try:
-            resolved_path = _resolve_dataset_path(path)
-        except Exception as e:
-            console.print(f"[red]Error downloading dataset:[/red] {e}")
-            raise typer.Exit(1)
-    else:
-        resolved_path = Path(path)
-        if not resolved_path.exists():
-            console.print(f"[red]Error:[/red] Dataset not found: {path}")
-            raise typer.Exit(1)
+    # Resolve path (supports hf:// URLs, registry IDs, and local paths)
+    try:
+        resolved_path = _resolve_dataset_path(path)
+    except Exception as e:
+        console.print(f"[red]Error resolving dataset:[/red] {e}")
+        raise typer.Exit(1)
+
+    if not resolved_path.exists():
+        console.print(f"[red]Error:[/red] Dataset not found: {path}")
+        raise typer.Exit(1)
 
     # Resolve comparison dataset if provided
     resolved_compare: Path | None = None
     if compare:
-        if is_hf_url(compare):
-            try:
-                resolved_compare = _resolve_dataset_path(compare)
-            except Exception as e:
-                console.print(f"[red]Error downloading comparison dataset:[/red] {e}")
-                raise typer.Exit(1)
-        else:
-            resolved_compare = Path(compare)
-            if not resolved_compare.exists():
-                console.print(f"[red]Error:[/red] Comparison dataset not found: {compare}")
-                raise typer.Exit(1)
+        try:
+            resolved_compare = _resolve_dataset_path(compare)
+        except Exception as e:
+            console.print(f"[red]Error resolving comparison dataset:[/red] {e}")
+            raise typer.Exit(1)
+        if not resolved_compare.exists():
+            console.print(f"[red]Error:[/red] Comparison dataset not found: {compare}")
+            raise typer.Exit(1)
 
     try:
-        # Handle OpenCV backend
-        if backend.lower() == "opencv":
+        if backend.lower() == "web":
+            if resolved_compare:
+                console.print("[yellow]Warning:[/yellow] Comparison mode not supported with web backend")
+
+            console.print(f"[cyan]Opening web viewer for:[/cyan] {resolved_path}")
+            if segment:
+                console.print("[dim]Segmentation with phase labels enabled[/dim]")
+
+            from forge.visualize.web_viewer import WebViewer
+
+            viewer = WebViewer(resolved_path, max_episodes=samples, segment=segment, port=port)
+            viewer.show()
+
+        elif backend.lower() == "opencv":
             if resolved_compare:
                 console.print("[yellow]Warning:[/yellow] Comparison mode not supported with opencv backend")
 
@@ -828,12 +838,12 @@ def visualize_cmd(
 
             from forge.visualize.cv_viewer import CVViewer
 
-            viewer = CVViewer(resolved_path)
+            viewer = CVViewer(resolved_path, max_episodes=samples)
             if episode > 0:
                 viewer.current_episode = min(episode, viewer.backend.get_num_episodes() - 1)
             viewer.show()
         else:
-            # Default matplotlib backend
+            # Matplotlib backend
             if resolved_compare:
                 console.print(f"[cyan]Opening comparison viewer:[/cyan]")
                 console.print(f"  Left:  {resolved_path}")
