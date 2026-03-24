@@ -7,8 +7,9 @@ Structure:
     dataset/
     ├── meta/
     │   ├── info.json
+    │   ├── tasks.jsonl
     │   ├── episodes.jsonl
-    │   └── stats.json
+    │   └── episodes_stats.jsonl
     ├── data/
     │   ├── chunk-000/
     │   │   ├── episode_000000.parquet
@@ -144,6 +145,7 @@ class LeRobotV2Reader:
 
         # Load info.json
         self._load_info_json(path, info)
+        self._load_task_metadata(path, info)
 
         # Analyze parquet schema
         self._analyze_parquet_schema(path, info)
@@ -214,6 +216,31 @@ class LeRobotV2Reader:
             "string": Dtype.STRING,
         }
         return mapping.get(dtype_str, Dtype.FLOAT32)
+
+    def _load_task_metadata(self, path: Path, info: DatasetInfo) -> None:
+        """Load task metadata from tasks.jsonl when present."""
+        tasks_path = path / "meta" / "tasks.jsonl"
+        if not tasks_path.exists():
+            return
+
+        sample_task = None
+        task_count = 0
+        try:
+            with open(tasks_path) as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    item = json.loads(line)
+                    task_count += 1
+                    if sample_task is None:
+                        sample_task = item.get("task")
+        except (json.JSONDecodeError, KeyError):
+            return
+
+        if task_count > 0:
+            info.has_language = True
+            info.language_coverage = 1.0
+            info.sample_language = sample_task
 
     def _analyze_parquet_schema(self, path: Path, info: DatasetInfo) -> None:
         """Analyze schema from parquet files."""
@@ -354,16 +381,34 @@ class LeRobotV2Reader:
         if not data_dir.exists():
             return
 
+        tasks = self._load_all_tasks(path)
+        episode_meta = self._load_episode_metadata(path)
+
         # Find all parquet files
         parquet_files = sorted(data_dir.rglob("*.parquet"))
 
         for pq_file in parquet_files:
             # Extract episode ID from filename
             episode_id = pq_file.stem  # e.g., "episode_000000"
+            episode_index = self._parse_episode_index(episode_id)
+            meta = episode_meta.get(episode_index, {})
+            task_index = meta.get("task_index")
+            language = None
+            if meta.get("tasks"):
+                language = meta["tasks"][0]
+            elif isinstance(task_index, int) and task_index in tasks:
+                language = tasks[task_index]
 
-            yield self._load_episode(path, pq_file, episode_id)
+            yield self._load_episode(path, pq_file, episode_id, language, task_index)
 
-    def _load_episode(self, dataset_path: Path, parquet_path: Path, episode_id: str) -> Episode:
+    def _load_episode(
+        self,
+        dataset_path: Path,
+        parquet_path: Path,
+        episode_id: str,
+        language: str | None = None,
+        task_index: int | None = None,
+    ) -> Episode:
         """Load a single episode from parquet file."""
         import pyarrow.parquet as pq
 
@@ -436,8 +481,12 @@ class LeRobotV2Reader:
 
         return Episode(
             episode_id=episode_id,
+            language_instruction=language,
             _frame_loader=load_frames,
-            metadata={"parquet_path": str(parquet_path)},
+            metadata={
+                "parquet_path": str(parquet_path),
+                **({"task_index": task_index} if task_index is not None else {}),
+            },
         )
 
     def _extract_frame(self, video_path: Path, frame_index: int) -> NDArray[Any]:
@@ -490,10 +539,67 @@ class LeRobotV2Reader:
         """
         path = Path(path)
         data_dir = path / "data"
+        episode_index = self._parse_episode_index(episode_id)
+        tasks = self._load_all_tasks(path)
+        episode_meta = self._load_episode_metadata(path)
+        meta = episode_meta.get(episode_index, {})
+        task_index = meta.get("task_index")
+        language = None
+        if meta.get("tasks"):
+            language = meta["tasks"][0]
+        elif isinstance(task_index, int) and task_index in tasks:
+            language = tasks[task_index]
 
         # Look for matching parquet file
         for pq_file in data_dir.rglob("*.parquet"):
             if pq_file.stem == episode_id:
-                return self._load_episode(path, pq_file, episode_id)
+                return self._load_episode(path, pq_file, episode_id, language, task_index)
 
         raise EpisodeNotFoundError(episode_id, path)
+
+    def _parse_episode_index(self, episode_id: str) -> int:
+        """Parse episode index from IDs like 'episode_000123'."""
+        try:
+            return int(episode_id.replace("episode_", ""))
+        except ValueError:
+            return 0
+
+    def _load_all_tasks(self, path: Path) -> dict[int, str]:
+        """Load task descriptions keyed by task index."""
+        tasks_path = path / "meta" / "tasks.jsonl"
+        if not tasks_path.exists():
+            return {}
+
+        tasks: dict[int, str] = {}
+        try:
+            with open(tasks_path) as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    item = json.loads(line)
+                    task_index = int(item.get("task_index", len(tasks)))
+                    tasks[task_index] = item.get("task", "")
+        except (json.JSONDecodeError, KeyError, ValueError):
+            return {}
+
+        return tasks
+
+    def _load_episode_metadata(self, path: Path) -> dict[int, dict[str, Any]]:
+        """Load per-episode metadata from episodes.jsonl."""
+        episodes_path = path / "meta" / "episodes.jsonl"
+        if not episodes_path.exists():
+            return {}
+
+        metadata: dict[int, dict[str, Any]] = {}
+        try:
+            with open(episodes_path) as f:
+                for idx, line in enumerate(f):
+                    if not line.strip():
+                        continue
+                    item = json.loads(line)
+                    episode_index = int(item.get("episode_index", idx))
+                    metadata[episode_index] = item
+        except (json.JSONDecodeError, KeyError, ValueError):
+            return {}
+
+        return metadata

@@ -35,6 +35,7 @@ class TestFormatRegistry:
         assert formats["rosbag"]["can_read"] is True
 
         # lerobot-v3 now has write capability
+        assert formats["lerobot-v2"]["can_write"] is True
         assert formats["lerobot-v3"]["can_write"] is True
 
     def test_get_reader(self):

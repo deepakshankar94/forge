@@ -693,14 +693,18 @@ class LeRobotV3Reader:
 
                     # Get language instruction for this episode
                     language = None
+                    task_index = None
                     if episode_meta and episode_idx in episode_meta:
                         meta = episode_meta[episode_idx]
                         task_idx = meta.get("task_index", 0)
-                        if tasks and task_idx < len(tasks):
+                        if meta.get("tasks"):
+                            language = meta["tasks"][0]
+                        elif task_idx in tasks:
                             language = tasks[task_idx]
+                        task_index = task_idx
 
                     yield self._load_episode_from_dataframe(
-                        path, pq_file, df, episode_idx, episode_id, language
+                        path, pq_file, df, episode_idx, episode_id, language, task_index
                     )
             else:
                 # Single episode per file (old format)
@@ -713,13 +717,17 @@ class LeRobotV3Reader:
 
                 # Get language instruction for this episode
                 language = None
+                task_index = None
                 if episode_meta and episode_idx in episode_meta:
                     meta = episode_meta[episode_idx]
                     task_idx = meta.get("task_index", 0)
-                    if tasks and task_idx < len(tasks):
+                    if meta.get("tasks"):
+                        language = meta["tasks"][0]
+                    elif task_idx in tasks:
                         language = tasks[task_idx]
+                    task_index = task_idx
 
-                yield self._load_episode(path, pq_file, episode_id, language)
+                yield self._load_episode(path, pq_file, episode_id, language, task_index)
 
     def _parse_episode_index(self, episode_id: str) -> int:
         """Parse episode index from ID like 'episode_000123'."""
@@ -728,40 +736,73 @@ class LeRobotV3Reader:
         except ValueError:
             return 0
 
-    def _load_all_tasks(self, path: Path) -> list[str]:
-        """Load all task descriptions."""
-        tasks_path = path / "meta" / "tasks.jsonl"
-        if not tasks_path.exists():
-            return []
+    def _load_all_tasks(self, path: Path) -> dict[int, str]:
+        """Load all task descriptions keyed by task index."""
+        tasks_jsonl = path / "meta" / "tasks.jsonl"
+        tasks_parquet = path / "meta" / "tasks.parquet"
+        tasks: dict[int, str] = {}
 
-        tasks = []
-        try:
-            with open(tasks_path) as f:
-                for line in f:
-                    if line.strip():
+        if tasks_jsonl.exists():
+            try:
+                with open(tasks_jsonl) as f:
+                    for idx, line in enumerate(f):
+                        if not line.strip():
+                            continue
                         task = json.loads(line)
-                        tasks.append(task.get("task", task.get("language", "")))
-        except (json.JSONDecodeError, KeyError):
-            pass
+                        task_index = int(task.get("task_index", idx))
+                        tasks[task_index] = task.get("task", task.get("language", ""))
+            except (json.JSONDecodeError, KeyError, ValueError):
+                return {}
+            return tasks
+
+        if tasks_parquet.exists():
+            try:
+                _check_pyarrow()
+                import pyarrow.parquet as pq
+
+                table = pq.read_table(tasks_parquet)
+                for idx, item in enumerate(table.to_pylist()):
+                    task_index = int(item.get("task_index", idx))
+                    tasks[task_index] = item.get("task", item.get("language", ""))
+            except Exception:
+                return {}
 
         return tasks
 
-    def _load_episode_metadata(self, path: Path) -> dict[int, dict]:
-        """Load per-episode metadata."""
+    def _load_episode_metadata(self, path: Path) -> dict[int, dict[str, Any]]:
+        """Load per-episode metadata from JSONL or parquet metadata files."""
         episodes_path = path / "meta" / "episodes.jsonl"
-        if not episodes_path.exists():
+        if episodes_path.exists():
+            metadata: dict[int, dict[str, Any]] = {}
+            try:
+                with open(episodes_path) as f:
+                    for idx, line in enumerate(f):
+                        if not line.strip():
+                            continue
+                        item = json.loads(line)
+                        episode_index = int(item.get("episode_index", idx))
+                        metadata[episode_index] = item
+            except (json.JSONDecodeError, KeyError, ValueError):
+                return {}
+            return metadata
+
+        episodes_dir = path / "meta" / "episodes"
+        if not episodes_dir.exists():
             return {}
 
-        metadata = {}
         try:
-            with open(episodes_path) as f:
-                for i, line in enumerate(f):
-                    if line.strip():
-                        metadata[i] = json.loads(line)
-        except (json.JSONDecodeError, KeyError):
-            pass
+            _check_pyarrow()
+            import pyarrow.parquet as pq
 
-        return metadata
+            metadata = {}
+            for pq_file in sorted(episodes_dir.rglob("*.parquet")):
+                table = pq.read_table(pq_file)
+                for idx, item in enumerate(table.to_pylist()):
+                    episode_index = int(item.get("episode_index", idx))
+                    metadata[episode_index] = item
+            return metadata
+        except Exception:
+            return {}
 
     def _load_episode_from_dataframe(
         self,
@@ -771,6 +812,7 @@ class LeRobotV3Reader:
         episode_idx: int,
         episode_id: str,
         language: str | None,
+        task_index: int | None,
     ) -> Episode:
         """Load a single episode from an already-loaded dataframe.
 
@@ -781,7 +823,7 @@ class LeRobotV3Reader:
         ep_df = df[df["episode_index"] == episode_idx].reset_index(drop=True)
 
         return self._build_episode(
-            dataset_path, parquet_path, ep_df, episode_idx, episode_id, language
+            dataset_path, parquet_path, ep_df, episode_idx, episode_id, language, task_index
         )
 
     def _load_episode(
@@ -790,6 +832,7 @@ class LeRobotV3Reader:
         parquet_path: Path,
         episode_id: str,
         language: str | None,
+        task_index: int | None,
     ) -> Episode:
         """Load a single episode from a parquet file."""
         import pyarrow.parquet as pq
@@ -805,7 +848,7 @@ class LeRobotV3Reader:
             ep_df = df
 
         return self._build_episode(
-            dataset_path, parquet_path, ep_df, episode_idx, episode_id, language
+            dataset_path, parquet_path, ep_df, episode_idx, episode_id, language, task_index
         )
 
     def _build_episode(
@@ -816,6 +859,7 @@ class LeRobotV3Reader:
         episode_idx: int,
         episode_id: str,
         language: str | None,
+        task_index: int | None,
     ) -> Episode:
         """Build an Episode object from a filtered dataframe."""
 
@@ -1046,6 +1090,10 @@ class LeRobotV3Reader:
         return Episode(
             episode_id=episode_id,
             language_instruction=language,
+            metadata={
+                "parquet_path": str(parquet_path),
+                **({"task_index": task_index} if task_index is not None else {}),
+            },
             _frame_loader=load_frames,
         )
 
@@ -1086,12 +1134,16 @@ class LeRobotV3Reader:
                 episode_idx = self._parse_episode_index(episode_id)
 
                 language = None
+                task_index = None
                 if episode_meta and episode_idx in episode_meta:
                     meta = episode_meta[episode_idx]
                     task_idx = meta.get("task_index", 0)
-                    if tasks and task_idx < len(tasks):
+                    if meta.get("tasks"):
+                        language = meta["tasks"][0]
+                    elif task_idx in tasks:
                         language = tasks[task_idx]
+                    task_index = task_idx
 
-                return self._load_episode(path, pq_file, episode_id, language)
+                return self._load_episode(path, pq_file, episode_id, language, task_index)
 
         raise EpisodeNotFoundError(episode_id, path)

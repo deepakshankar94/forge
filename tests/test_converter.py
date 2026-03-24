@@ -282,6 +282,95 @@ class TestConverter:
         assert info["fps"] == 60.0
         assert info["robot_type"] == "custom_robot"
 
+    @pytest.mark.skipif(
+        not _check_dependencies_available(),
+        reason="PyAV or PyArrow not installed",
+    )
+    def test_convert_lerobot_v3_to_lerobot_v2(self, tmp_path: Path):
+        """Test converting a local LeRobot v3 dataset to legacy LeRobot v2."""
+        from forge.formats.lerobot_v2.reader import LeRobotV2Reader
+        from forge.formats.lerobot_v3.writer import LeRobotV3Writer, LeRobotV3WriterConfig
+
+        def make_episode(episode_index: int) -> Episode:
+            def frame_loader():
+                for frame_idx in range(3 + episode_index):
+                    def image_loader(idx: int = frame_idx, ep_idx: int = episode_index):
+                        image = np.zeros((24, 24, 3), dtype=np.uint8)
+                        image[:, :, 0] = (ep_idx + 1) * 40
+                        image[:, :, 1] = idx * 30
+                        image[:, :, 2] = 10
+                        return image
+
+                    yield Frame(
+                        index=frame_idx,
+                        timestamp=frame_idx / 20.0,
+                        images={
+                            "camera0": LazyImage(
+                                loader=image_loader,
+                                height=24,
+                                width=24,
+                                channels=3,
+                            )
+                        },
+                        state=np.array([episode_index, frame_idx], dtype=np.float32),
+                        action=np.array([frame_idx * 0.5], dtype=np.float32),
+                    )
+
+            return Episode(
+                episode_id=f"ep_{episode_index:03d}",
+                language_instruction=f"Task {episode_index}",
+                cameras={"camera0": CameraInfo(name="camera0", height=24, width=24)},
+                fps=20.0,
+                _frame_loader=frame_loader,
+            )
+
+        source_path = tmp_path / "source_v3"
+        output_path = tmp_path / "output_v2"
+
+        v3_writer = LeRobotV3Writer(LeRobotV3WriterConfig(fps=20.0, robot_type="test_robot"))
+        v3_writer.write_dataset(iter([make_episode(0), make_episode(1)]), source_path)
+
+        converter = Converter(ConversionConfig(target_format="lerobot-v2"))
+        result = converter.convert(
+            source_path,
+            output_path,
+            source_format="lerobot-v3",
+        )
+
+        assert result.success is True
+        assert result.source_format == "lerobot-v3"
+        assert result.target_format == "lerobot-v2"
+        assert result.episodes_converted == 2
+
+        assert (output_path / "meta" / "info.json").exists()
+        assert (output_path / "meta" / "tasks.jsonl").exists()
+        assert (output_path / "meta" / "episodes.jsonl").exists()
+        assert (output_path / "meta" / "episodes_stats.jsonl").exists()
+        assert (output_path / "data" / "chunk-000" / "episode_000000.parquet").exists()
+        assert (
+            output_path
+            / "videos"
+            / "chunk-000"
+            / "observation.images.camera0"
+            / "episode_000000.mp4"
+        ).exists()
+
+        with open(output_path / "meta" / "tasks.jsonl") as f:
+            tasks = [json.loads(line) for line in f if line.strip()]
+        with open(output_path / "meta" / "episodes.jsonl") as f:
+            episodes = [json.loads(line) for line in f if line.strip()]
+
+        assert tasks == [
+            {"task_index": 0, "task": "Task 0"},
+            {"task_index": 1, "task": "Task 1"},
+        ]
+        assert [episode["task_index"] for episode in episodes] == [0, 1]
+        assert [episode["tasks"] for episode in episodes] == [["Task 0"], ["Task 1"]]
+
+        reader = LeRobotV2Reader()
+        converted_episodes = list(reader.read_episodes(output_path))
+        assert [episode.language_instruction for episode in converted_episodes] == ["Task 0", "Task 1"]
+
     def test_convert_unsupported_format(self, tmp_path: Path):
         """Test conversion with unsupported format raises error when fail_on_error=True."""
         from forge.core.exceptions import UnsupportedFormatError
